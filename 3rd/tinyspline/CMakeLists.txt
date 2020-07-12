@@ -1,0 +1,1 @@
+add_library(tinyspline STATIC tinysplinecpp.cpp tinyspline.c parson.c)

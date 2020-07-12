@@ -1,0 +1,1 @@
+add_library(dxflib STATIC dl_dxf.cpp dl_writer_ascii.cpp)
