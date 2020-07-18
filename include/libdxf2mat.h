@@ -10,18 +10,27 @@ namespace libdxf2mat {
 
 	// drawing parameters
 	struct DrawConfig {
-		// will not change cache
-		int thickness;  // line thickness
-		cv::LineTypes line_type;  // same as opencv
-		double zoom;  // zoom index, x_pixel = round(zoom * x_dxf)
+		// line thickness
+		int thickness;
 
-		// will change cache
-		double sample_interval;  // Distance between adjacent sampling points won't 
-		                         // be larger than sample_interval in original coordinate.		                        
+		// same as opencv
+		cv::LineTypes line_type;
+
+		// zoom index, x_pixel = round(zoom * x_dxf)
+		double zoom;
+
+		// page margin
+		cv::Point2i margin;
+
+		// Specific for circle, arc, ellipse, spline.
+		// Distance between adjacent sampling points won't 
+		// be larger than sample_interval in pixel coordinate.
+		double sample_interval;  
 	};
 
 	class Dxf2MatImpl;
 
+	// Convert dxf file to cv::Mat
 	class Dxf2Mat {
 	public:
 		Dxf2Mat();
@@ -30,7 +39,7 @@ namespace libdxf2mat {
 		Dxf2Mat(const Dxf2Mat&) = delete;
 		Dxf2Mat& operator= (const Dxf2Mat&) = delete;
 
-	    cv::Rect2d parse(const std::string& filename);
+	    bool parse(const std::string& filename, cv::Rect2d& box);
 		cv::Mat draw(const DrawConfig& config);
 
 	private:
