@@ -113,18 +113,36 @@ namespace libdxf2mat {
 		bool isClosed;
 	};
 
-	// represent circle, arc and ellipse
-	class Arc {
+	class Line {
 	public:
-		Arc(const Point2d& cen, double r) : m_cen(cen), m_r(r) {}
-		Arc(double x, double y, double r) :m_cen(x, y), m_r(r) {}
+		Line(const Point2d& from, const Point2d& to):
+			m_pt1(from), m_pt2(to)
+		{}
+
+		RasterizeData discretize(double interval, const Trans2D& trans) const
+		{
+			RasterizeData ras_data;
+			ras_data.isClosed = false;
+			ras_data.pts.emplace_back(round_point(trans.transfer(m_pt1)));
+			ras_data.pts.emplace_back(round_point(trans.transfer(m_pt2)));
+			return ras_data;
+		}
+	    
+		Point2d m_pt1;
+		Point2d m_pt2;
+	};
+
+	class Circle {
+	public:
+		Circle(const Point2d& cen, double r) : m_cen(cen), m_r(r) {}
+		Circle(double x, double y, double r) : m_cen(x, y), m_r(r) {}
 
 		RasterizeData discretize(double interval, const Trans2D& trans) const
 		{
 			// roughly estimates sample points number
 			double zoom = sqrt(trans.det());
 			double r = zoom * m_r;
-			int pt_nums = ceil(2.0 * CV_PI * r / interval);
+			int pt_nums = max(1, int(ceil(2.0 * CV_PI * r / interval)));
 			double step = 2 * CV_PI / pt_nums;
 
 			double theta = 0.0;
@@ -140,8 +158,41 @@ namespace libdxf2mat {
 			return ras_data;
 		}
 
-		cv::Point2d m_cen;
+		Point2d m_cen;
 		double m_r;
+	};
+
+	class Arc {
+	public:
+		Arc(const Point2d& cen, double r, double rad_beg, double rad_end):
+			m_cen(cen), m_r(r), m_beg(rad_beg), m_end(rad_end)
+		{}
+
+		RasterizeData discretize(double interval, const Trans2D& trans) const
+		{
+			// roughly estimates sample points number
+			double zoom = sqrt(trans.det());
+			double r = zoom * m_r;
+			int pt_nums = max(1, int(ceil(r * (m_end - m_beg) / interval))) + 1;
+			double step = (m_end - m_beg) / (pt_nums - 1);
+
+			double theta = m_beg;
+			RasterizeData ras_data;
+			ras_data.isClosed = false;
+			for (int i = 0; i < pt_nums; ++i)
+			{
+				Point2d pt(m_r * cos(theta), m_r * sin(theta));
+				pt += m_cen;
+				ras_data.pts.emplace_back(round_point(trans.transfer(pt)));
+				theta += step;
+			}
+			return ras_data;
+		}
+	
+		Point2d m_cen;
+		double m_r;
+		double m_beg;
+		double m_end;
 	};
 
 }  // namespace libdxf2mat
