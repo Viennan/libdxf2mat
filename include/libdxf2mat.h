@@ -22,9 +22,13 @@ namespace libdxf2mat {
 		// page margin
 		cv::Point2i margin;
 
+		unsigned int mat_type;
+		cv::Scalar color;
+
 		// Specific for circle, arc, ellipse, spline.
-		// Distance between adjacent sampling points won't 
-		// be larger than sample_interval in pixel coordinate.
+		// The Converter will try to make distance between
+		// adjacent sampling points no larger than 
+		// sample_interval in pixel coordinate.
 		double sample_interval;  
 	};
 
@@ -40,7 +44,7 @@ namespace libdxf2mat {
 		Dxf2Mat& operator= (const Dxf2Mat&) = delete;
 
 	    bool parse(const std::string& filename, cv::Rect2d& box);
-		cv::Mat draw(const DrawConfig& config);
+		cv::Mat draw(const DrawConfig& config) const;
 
 	private:
 		std::unique_ptr<Dxf2MatImpl> m_worker;
