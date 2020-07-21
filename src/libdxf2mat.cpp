@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <vector>
+#include <random>
 
 namespace libdxf2mat {
 
@@ -17,13 +18,20 @@ namespace libdxf2mat {
 		return Point(round(p.x), round(p.y));
 	}
 
+	static double getRandomDoule()
+	{
+		static default_random_engine e;
+		static uniform_real<double> distri(0.0, 1.0);
+		return distri(e);
+	}
+
 	// 2D transformation
 	class Trans2D {
 	public:
 		// zoom -> rotate -> translate
-		Trans2D(double rad, double dx, double dy, double zoomx, double zoomy):
+		Trans2D(double rad, double dx, double dy, double zoomx = 1.0, double zoomy = 1.0):
 			mat{zoomx * cos(rad), -zoomy * sin(rad), dx, 
-			    zoomx * sin(rad), zoomy * cos(rad), dy} 
+			    zoomx * sin(rad), zoomy * cos(rad), dy } 
 		{}
 
 		Trans2D(const Trans2D& trans) :
@@ -38,19 +46,30 @@ namespace libdxf2mat {
 
 		Trans2D& operator= (const Trans2D& lh) 
 		{
-			memcpy(mat, lh.mat, sizeof(mat));
+			if (this != std::addressof(lh))
+			{
+				mat[0] = lh.mat[0];
+				mat[1] = lh.mat[1];
+				mat[2] = lh.mat[2];
+				mat[3] = lh.mat[3];
+				mat[4] = lh.mat[4];
+				mat[5] = lh.mat[5];
+			}
 			return *this;
 		}
 
 		Trans2D& operator*=(const Trans2D& rh)
 		{
-			for (int i = 0; i < 2; ++i)
-			{
-				int base = 3 * i;
-				double m0 = mat[base], m1 = mat[base+1], m2 = mat[base+2];
-				for (int j = 0; j < 3; ++j)
-					mat[base + j] = m0 * rh.mat[j] + m1 * rh.mat[j + 3] + m2 * (j >> 1);
-			}
+			double m0 = mat[0] * rh.mat[0] + mat[1] * rh.mat[3];
+			double m1 = mat[0] * rh.mat[1] + mat[1] * rh.mat[4];
+			double m2 = mat[0] * rh.mat[2] + mat[1] * rh.mat[5] + mat[2];
+
+			double m3 = mat[3] * rh.mat[0] + mat[4] * rh.mat[3];
+			double m4 = mat[3] * rh.mat[1] + mat[4] * rh.mat[4];
+			double m5 = mat[3] * rh.mat[2] + mat[4] * rh.mat[5] + mat[5];
+
+			mat[0] = m0, mat[1] = m1, mat[2] = m2;
+			mat[3] = m3, mat[4] = m4, mat[5] = m5;
 			return *this;
 		}
 
@@ -72,7 +91,8 @@ namespace libdxf2mat {
 			return mat[0] * mat[4] - mat[1] * mat[3];
 		}
 
-		double mat[6] = { 1.0, 0.0, 0.0, 0.0 ,1.0, 0.0 };
+		double mat[6] = { 1.0, 0.0, 0.0, 
+			              0.0 ,1.0, 0.0 };
 	};
 
 	static inline Trans2D operator*(const Trans2D& lh, const Trans2D& rh)
@@ -98,14 +118,20 @@ namespace libdxf2mat {
 		{};
 		RasterizeData& operator= (const RasterizeData& lh)
 		{
-			pts = lh.pts;
-			isClosed = lh.isClosed;
+			if (this != std::addressof(lh))
+			{
+				pts = lh.pts;
+				isClosed = lh.isClosed;
+			}
 			return *this;
 		}
 		RasterizeData& operator= (RasterizeData&& rh) noexcept
 		{
-			pts = std::move(rh.pts);
-			isClosed = std::move(rh.isClosed);
+			if (this != std::addressof(rh))
+			{
+				pts = std::move(rh.pts);
+				isClosed = std::move(rh.isClosed);
+			}
 			return *this;
 		}
 
@@ -194,6 +220,137 @@ namespace libdxf2mat {
 		double m_beg;
 		double m_end;
 	};
+
+	class Ellipse {
+	public:
+		Ellipse(const Point2d& cen, const Size2d& axes, double rad, double beg, double End):
+			m_cen(cen), m_axes(axes), m_rot_rad(rad), m_beg(beg), m_end(End)
+		{}
+
+		RasterizeData discretize(double interval, const Trans2D& trans) const
+		{
+			// roughly estimates sample points number
+			double zoom = sqrt(trans.det());
+			double r = max(m_axes.width, m_axes.height) * zoom;
+			int pt_nums = max(1, int(ceil((m_end - m_beg) / interval))) + 1;
+			double step = (m_end - m_beg) / (pt_nums - 1);
+
+			double theta = m_beg;
+			RasterizeData ras_data;
+			ras_data.isClosed = false;
+			// Note: tran2d and trans have the same determinant.
+			Trans2D tran2d = trans * Trans2D(m_rot_rad, m_cen.x, m_cen.y);
+			for (int i = 0; i < pt_nums; ++i)
+			{
+				Point2d pt(cos(theta) * m_axes.width, sin(theta) * m_axes.height);
+				ras_data.pts.emplace_back(round_point(tran2d.transfer(pt)));
+				theta += step;
+			}
+			return ras_data;			
+		}
+
+		Point2d m_cen;
+		Size2d m_axes;
+		double m_rot_rad;
+		double m_beg;
+		double m_end;
+	};
+
+	// A pipline between 2D nurbs to 3D b-spline
+	class tinynurbs2d :public tinyspline::BSpline {
+
+	public:
+		tinynurbs2d(size_t nCtrlp, size_t deg = 3, tinyspline::BSpline::type type = TS_CLAMPED) :
+			BSpline(nCtrlp, 3, deg, type) {}
+
+		Point2d at(double u) const
+		{
+			auto val = BSpline::eval(u).result();
+			return Point2d(val[0], val[1]);
+		}
+
+		void setNurbsControlPoints(const vector<Vec3d>& conPs)
+		{
+			vector<tinyspline::real> pts;
+			for (const auto& p : conPs)
+			{
+				pts.push_back(p[0] * p[2]);
+				pts.push_back(p[1] * p[2]);
+				pts.push_back(p[2]);
+			}
+			BSpline::setControlPoints(pts);
+		}
+
+		vector<Point2d> sampleNurbs(size_t num) const
+		{
+			auto wPts = BSpline::sample(num);
+			vector<Point2d> pts;
+			for (int i = 0; i < wPts.size() - 2; i += 3)
+			{
+				double w = wPts[i + 2];
+				if (w == 0.0)
+					continue;
+
+				pts.emplace_back(wPts[i] / w, wPts[i + 1] / w);
+			}
+			return pts;
+		}
+
+	private:
+		using BSpline::setControlPoints;
+		using BSpline::sample;
+
+	};
+
+	class Spline {
+	public:
+		Spline(unsigned _degree, const vector<Vec3d>& vs, const vector<double>& _knots, int _flag, size_t _sampleNum) :
+			degree(_degree), vertexes(vs), knots(_knots), flag(_flag),
+			m_impl(vertexes.size(), degree)
+		{
+			m_impl.setNurbsControlPoints(vertexes);
+			vector<tinyspline::real> ks;
+			for (const auto& kn : knots)
+				ks.push_back(kn);
+			m_impl.setKnots(ks);
+		}
+
+		RasterizeData discretize(double interval, const Trans2D& trans) const
+		{
+			// roughly estimates sample points number
+			double dt = min(0.002, 2.0 / vertexes.size());
+			unsigned long long pt_nums = max(1000ull, vertexes.size());
+			double range = 1.0 - dt;
+			double samp = dt / 2.0;
+			double len = 0.0;
+			for (int i = 0; i < 10; ++i)
+			{
+				double pos = samp + getRandomDoule() * range;
+				auto val_left = trans.transfer(m_impl.at(pos - samp));
+				auto val_right = trans.transfer(m_impl.at(pos + samp));
+				len += sqrt(pow(val_left.x - val_right.x, 2) + pow(val_left.y - val_right.y, 2));
+			}
+			len /= (10.0 * dt);
+			int pt_nums = max(1, int(min(1000000.0, ceil(len / interval)))) + 1;
+
+			auto pts = m_impl.sampleNurbs(pt_nums);
+			RasterizeData ras_data;
+			ras_data.isClosed = flag;
+			for (const auto& p : pts)
+				ras_data.pts.emplace_back(round_point(trans.transfer(p)));
+			return ras_data;
+		}
+
+		unsigned int degree = 2;
+		vector<Vec3d> vertexes;
+		vector<double> knots;
+		int flag = false;
+
+	private:
+		tinynurbs2d m_impl;
+	};
+
+
 
 }  // namespace libdxf2mat
 
