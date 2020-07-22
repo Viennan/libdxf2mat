@@ -5,7 +5,7 @@
 
 #include <cmath>
 #include <vector>
-#include <random>
+#include <algorithm>
 
 namespace libdxf2mat {
 
@@ -16,13 +16,6 @@ namespace libdxf2mat {
 	static inline Point round_point(const Point_<T>& p)
 	{
 		return Point(round(p.x), round(p.y));
-	}
-
-	static double getRandomDoule()
-	{
-		static default_random_engine e;
-		static uniform_real<double> distri(0.0, 1.0);
-		return distri(e);
 	}
 
 	// 2D transformation
@@ -46,15 +39,12 @@ namespace libdxf2mat {
 
 		Trans2D& operator= (const Trans2D& lh) 
 		{
-			if (this != std::addressof(lh))
-			{
-				mat[0] = lh.mat[0];
-				mat[1] = lh.mat[1];
-				mat[2] = lh.mat[2];
-				mat[3] = lh.mat[3];
-				mat[4] = lh.mat[4];
-				mat[5] = lh.mat[5];
-			}
+			mat[0] = lh.mat[0];
+			mat[1] = lh.mat[1];
+			mat[2] = lh.mat[2];
+			mat[3] = lh.mat[3];
+			mat[4] = lh.mat[4];
+			mat[5] = lh.mat[5];
 			return *this;
 		}
 
@@ -145,7 +135,7 @@ namespace libdxf2mat {
 			m_pt1(from), m_pt2(to)
 		{}
 
-		RasterizeData discretize(double interval, const Trans2D& trans) const
+		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
 			RasterizeData ras_data;
 			ras_data.isClosed = false;
@@ -158,27 +148,143 @@ namespace libdxf2mat {
 		Point2d m_pt2;
 	};
 
+	// Use Micke's Formula to calculate center with begin point and end point and bulge for all cases.
+	static inline double mickeFormula(const Vec3d& b, const Vec3d& e, Point2d& cen)
+	{
+		auto bulge = 0.5 * (1.0 / b[2] - b[2]);
+		cen.x = 0.5 * ((b[0] + e[0]) - bulge * (e[1] - b[1]));
+		cen.y = 0.5 * ((b[1] + e[1]) + bulge * (e[0] - b[0]));
+		return sqrt(pow(b[0] - cen.x, 2) + pow(b[1] - cen.y, 2));
+	}
+
+	class Polylines {
+	public:
+		Polylines(const vector<Vec3d>& vs, bool closed):
+			vertices(vs), isClosed(closed), m_len(0.0), isOpt(false)
+		{
+			// If it is a optimize polylines
+			for (const auto& v : vs)
+			{
+				if (v[2] != 0.0)
+				{
+					isOpt = true;
+					break;
+				}
+			}
+			if (isOpt)
+			{
+				// For optimize polylines
+				size_t n = vertices.size();
+				auto n_minus_1 = n - 1;
+				for (size_t i = 0; i < n_minus_1; ++i)
+				{
+					Point2d p;
+					auto r = mickeFormula(vertices[i], vertices[i + 1], p);
+					m_len += 4.0 * r * atan(vertices[i][2]);
+				}
+				if (isClosed)
+				{
+					Point2d p;
+					auto r = mickeFormula(vertices[n - 1], vertices[0], p);
+					m_len = 4.0 * r * atan(vertices[n - 1][2]);
+				}
+			}
+			else
+			{
+				// For normal polylines
+				size_t n = vertices.size();
+				auto n_minus_1 = n - 1;
+				for (size_t i = 0; i < n_minus_1; ++i)
+				{
+					m_len += sqrt(pow(vertices[i][0] - vertices[i + 1][0], 2) + 
+						pow(vertices[i][1] - vertices[i + 1][1], 2));
+				}
+				if (isClosed)
+					m_len += sqrt(pow(vertices[n - 1][0] - vertices[0][0], 2) +
+						pow(vertices[n - 1][1] - vertices[0][1], 2));
+			}
+		}
+
+		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
+		{
+			RasterizeData ras_data;
+			ras_data.isClosed = isClosed;
+			int freepts = max_pts < vertices.size() * 2 ? 0 : (max_pts - vertices.size());
+			if (isOpt && freepts > 0)
+			{
+				freepts = ceil(min(double(freepts), m_len * sqrt(trans.det()) / interval));
+				size_t n = vertices.size();
+				for (size_t i = 0; i < n; ++i)
+				{
+					const auto& vb = vertices[i];
+					ras_data.pts.emplace_back(round_point(trans.transfer(Point2d(vb[0], vb[1]))));
+					if (!isClosed && i == n - 1)
+						break;
+					const auto& ve = (i == n - 1) ? vertices[0] : vertices[i + 1];
+					if (vb[2] != 0.0)
+					{
+						Point2d cen;
+						auto r = mickeFormula(vb, ve, cen);
+						auto cen_rad = 4.0 * atan(vb[2]);
+						auto len = r * cen_rad;
+						int pt_nums = round(len / m_len * freepts);
+						if (pt_nums > 0)
+						{
+							double step = cen_rad / (pt_nums + 1);
+							double theta = acos((vb[0] - cen.x) / r);
+							theta = vb[1] < cen.y ? (2.0 * CV_PI - theta) : theta;
+							theta += step;
+							for (int j = 0; j < pt_nums; ++j)
+							{
+								Point2d p(r * cos(theta), r * sin(theta));
+								p += cen;
+								ras_data.pts.emplace_back(round_point(trans.transfer(p)));
+								theta += step;
+							}
+						}
+					}
+				}
+			}
+			else
+			{
+				ras_data.pts.resize(vertices.size());
+				std::transform(vertices.cbegin(), vertices.cend(), ras_data.pts.begin(),
+					[&trans](const Vec3d& p) {
+						return round_point(trans.transfer(Point2d(p[0], p[1])));
+					});
+			}
+			return ras_data;
+		}
+
+		vector<Vec3d> vertices;
+		bool isClosed;
+	private:
+		double m_len;
+		bool isOpt;
+	};
+
 	class Circle {
 	public:
 		Circle(const Point2d& cen, double r) : m_cen(cen), m_r(r) {}
 		Circle(double x, double y, double r) : m_cen(x, y), m_r(r) {}
 
-		RasterizeData discretize(double interval, const Trans2D& trans) const
+		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
 			// roughly estimates sample points number
 			double zoom = sqrt(trans.det());
 			double r = zoom * m_r;
-			int pt_nums = max(1, int(ceil(2.0 * CV_PI * r / interval)));
+			size_t pt_nums = max(1ull, size_t(min(double(max_pts - 1), ceil(2.0 * CV_PI * r / interval))));
 			double step = 2 * CV_PI / pt_nums;
 
 			double theta = 0.0;
 			RasterizeData ras_data;
 			ras_data.isClosed = true;
-			for (int i = 0; i < pt_nums; ++i)
+			ras_data.pts.resize(pt_nums);
+			for (size_t i = 0; i < pt_nums; ++i)
 			{
 				Point2d pt(m_r * cos(theta), m_r * sin(theta));
 				pt += m_cen;
-				ras_data.pts.emplace_back(round_point(trans.transfer(pt)));
+				ras_data.pts[i] = round_point(trans.transfer(pt));
 				theta += step;
 			}
 			return ras_data;
@@ -194,22 +300,23 @@ namespace libdxf2mat {
 			m_cen(cen), m_r(r), m_beg(rad_beg), m_end(rad_end)
 		{}
 
-		RasterizeData discretize(double interval, const Trans2D& trans) const
+		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
 			// roughly estimates sample points number
 			double zoom = sqrt(trans.det());
 			double r = zoom * m_r;
-			int pt_nums = max(1, int(ceil(r * (m_end - m_beg) / interval))) + 1;
+			size_t pt_nums = max(2ull, size_t(min(double(max_pts - 1), ceil(r * (m_end - m_beg) / interval))) + 1ull);
 			double step = (m_end - m_beg) / (pt_nums - 1);
 
 			double theta = m_beg;
 			RasterizeData ras_data;
 			ras_data.isClosed = false;
-			for (int i = 0; i < pt_nums; ++i)
+			ras_data.pts.resize(pt_nums);
+			for (size_t i = 0; i < pt_nums; ++i)
 			{
 				Point2d pt(m_r * cos(theta), m_r * sin(theta));
 				pt += m_cen;
-				ras_data.pts.emplace_back(round_point(trans.transfer(pt)));
+				ras_data.pts[i] = round_point(trans.transfer(pt));
 				theta += step;
 			}
 			return ras_data;
@@ -227,23 +334,24 @@ namespace libdxf2mat {
 			m_cen(cen), m_axes(axes), m_rot_rad(rad), m_beg(beg), m_end(End)
 		{}
 
-		RasterizeData discretize(double interval, const Trans2D& trans) const
+		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
 			// roughly estimates sample points number
 			double zoom = sqrt(trans.det());
 			double r = max(m_axes.width, m_axes.height) * zoom;
-			int pt_nums = max(1, int(ceil((m_end - m_beg) / interval))) + 1;
+			size_t pt_nums = max(2ull, size_t(min(double(max_pts - 1), ceil(r * (m_end - m_beg) / interval))) + 1ull);
 			double step = (m_end - m_beg) / (pt_nums - 1);
 
 			double theta = m_beg;
 			RasterizeData ras_data;
 			ras_data.isClosed = false;
+			ras_data.pts.resize(pt_nums);
 			// Note: tran2d and trans have the same determinant.
 			Trans2D tran2d = trans * Trans2D(m_rot_rad, m_cen.x, m_cen.y);
 			for (int i = 0; i < pt_nums; ++i)
 			{
 				Point2d pt(cos(theta) * m_axes.width, sin(theta) * m_axes.height);
-				ras_data.pts.emplace_back(round_point(tran2d.transfer(pt)));
+				ras_data.pts[i] = round_point(tran2d.transfer(pt));
 				theta += step;
 			}
 			return ras_data;			
@@ -304,50 +412,57 @@ namespace libdxf2mat {
 
 	class Spline {
 	public:
-		Spline(unsigned _degree, const vector<Vec3d>& vs, const vector<double>& _knots, int _flag, size_t _sampleNum) :
-			degree(_degree), vertexes(vs), knots(_knots), flag(_flag),
-			m_impl(vertexes.size(), degree)
+		Spline(unsigned _degree, const vector<Vec3d>& vs, const vector<double>& _knots, 
+			int closed, size_t _sampleNum) :
+			degree(_degree), vertexes(vs), knots(_knots), isClosed(closed), 
+			m_impl(vertexes.size(), degree), m_length(0.0)
 		{
 			m_impl.setNurbsControlPoints(vertexes);
 			vector<tinyspline::real> ks;
 			for (const auto& kn : knots)
 				ks.push_back(kn);
 			m_impl.setKnots(ks);
+
+			// roughly estimates the length of spline
+			auto pts = m_impl.sampleNurbs(100);
+			int num = pts.size();
+			for (size_t i = 1; i < num; ++i)
+			{
+				double dis = sqrt(pow(pts[i].x - pts[i - 1].x, 2) + pow(pts[i].y - pts[i - 1].y, 2));
+				m_length += dis;
+			}
+			if (isClosed)
+			{
+				double dis = sqrt(pow(pts[num - 1].x - pts[0].x, 2) + pow(pts[num - 1].y - pts[0].y, 2));
+				m_length += dis;
+			}
 		}
 
-		RasterizeData discretize(double interval, const Trans2D& trans) const
+		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
 			// roughly estimates sample points number
-			double dt = min(0.002, 2.0 / vertexes.size());
-			unsigned long long pt_nums = max(1000ull, vertexes.size());
-			double range = 1.0 - dt;
-			double samp = dt / 2.0;
-			double len = 0.0;
-			for (int i = 0; i < 10; ++i)
-			{
-				double pos = samp + getRandomDoule() * range;
-				auto val_left = trans.transfer(m_impl.at(pos - samp));
-				auto val_right = trans.transfer(m_impl.at(pos + samp));
-				len += sqrt(pow(val_left.x - val_right.x, 2) + pow(val_left.y - val_right.y, 2));
-			}
-			len /= (10.0 * dt);
-			int pt_nums = max(1, int(min(1000000.0, ceil(len / interval)))) + 1;
-
+			double len = m_length * sqrt(trans.det());
+			size_t pt_nums = max(2ull, size_t(min(double(max_pts - 1), 
+				ceil(len / interval))) + 1ull);
 			auto pts = m_impl.sampleNurbs(pt_nums);
 			RasterizeData ras_data;
-			ras_data.isClosed = flag;
-			for (const auto& p : pts)
-				ras_data.pts.emplace_back(round_point(trans.transfer(p)));
+			ras_data.isClosed = isClosed;
+			ras_data.pts.resize(pts.size());
+			std::transform(pts.cbegin(), pts.cend(), ras_data.pts.begin(),
+				[&trans](const Point2d& p) { 
+					return round_point(trans.transfer(p)); 
+				});
 			return ras_data;
 		}
 
-		unsigned int degree = 2;
+		unsigned int degree;
 		vector<Vec3d> vertexes;
 		vector<double> knots;
-		int flag = false;
+		bool isClosed;
 
 	private:
 		tinynurbs2d m_impl;
+		double m_length;
 	};
 
 

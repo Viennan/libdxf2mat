@@ -25,6 +25,11 @@ namespace libdxf2mat {
 		unsigned int mat_type;
 		cv::Scalar color;
 
+		// max sample points on each graphic
+		// Note: max_sample_pts is invalid when a graphic has more original vertices. 
+		// For example, a polylines has (max_sample_pts + 1) vertices.
+		int max_sample_pts;
+
 		// Specific for circle, arc, ellipse, spline.
 		// The Converter will try to make distance between
 		// adjacent sampling points no larger than 
