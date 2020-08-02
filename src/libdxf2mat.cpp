@@ -5,6 +5,8 @@
 
 #include <cmath>
 #include <vector>
+#include <array>
+#include <unordered_map>
 #include <algorithm>
 
 namespace libdxf2mat {
@@ -12,15 +14,40 @@ namespace libdxf2mat {
 	using namespace std;
 	using namespace cv;
 
+	// number of graphic types
+	constexpr size_t GTYPES = 6;
+
+	// id of each graphic
+	constexpr size_t LINE = 0;
+	constexpr size_t POLYLINES = 1;
+	constexpr size_t CIRCLE = 2;
+	constexpr size_t ARC = 3;
+	constexpr size_t ELLIPSE = 4;
+	constexpr size_t SPLINE = 5;
+
 	template<typename T>
 	static inline Point round_point(const Point_<T>& p)
 	{
 		return Point(round(p.x), round(p.y));
 	}
 
+	static inline double to_rad(double an)
+	{
+		return an / 180.0 * CV_PI;
+	}
+
+	static inline double modular(double v, double mod)
+	{
+		return v - floor(v / mod) * mod;
+	}
+
 	// 2D transformation
 	class Trans2D {
 	public:
+		Trans2D(): mat{1.0, 0.0, 0.0,
+		               0.0, 1.0, 0.0}
+		{}
+
 		// zoom -> rotate -> translate
 		Trans2D(double rad, double dx, double dy, double zoomx = 1.0, double zoomy = 1.0):
 			mat{zoomx * cos(rad), -zoomy * sin(rad), dx, 
@@ -159,11 +186,20 @@ namespace libdxf2mat {
 
 	class Polylines {
 	public:
+		explicit Polylines(bool closed) :vertices(), isClosed(closed), 
+			m_cirlen(0.0), isOpt(false)
+		{}
+
 		Polylines(const vector<Vec3d>& vs, bool closed):
-			vertices(vs), isClosed(closed), m_len(0.0), isOpt(false)
+			vertices(vs), isClosed(closed), m_cirlen(0.0), isOpt(false)
+		{
+			update();
+		}
+
+		void update()
 		{
 			// If it is a optimize polylines
-			for (const auto& v : vs)
+			for (const auto& v : vertices)
 			{
 				if (v[2] != 0.0)
 				{
@@ -178,30 +214,18 @@ namespace libdxf2mat {
 				auto n_minus_1 = n - 1;
 				for (size_t i = 0; i < n_minus_1; ++i)
 				{
+					if (vertices[i][2] == 0.0)
+						continue;
 					Point2d p;
 					auto r = mickeFormula(vertices[i], vertices[i + 1], p);
-					m_len += 4.0 * r * atan(vertices[i][2]);
+					m_cirlen += 4.0 * r * atan(vertices[i][2]);
 				}
-				if (isClosed)
+				if (isClosed && vertices[n - 1][2] != 0.0)
 				{
 					Point2d p;
 					auto r = mickeFormula(vertices[n - 1], vertices[0], p);
-					m_len = 4.0 * r * atan(vertices[n - 1][2]);
+					m_cirlen = 4.0 * r * atan(vertices[n - 1][2]);
 				}
-			}
-			else
-			{
-				// For normal polylines
-				size_t n = vertices.size();
-				auto n_minus_1 = n - 1;
-				for (size_t i = 0; i < n_minus_1; ++i)
-				{
-					m_len += sqrt(pow(vertices[i][0] - vertices[i + 1][0], 2) + 
-						pow(vertices[i][1] - vertices[i + 1][1], 2));
-				}
-				if (isClosed)
-					m_len += sqrt(pow(vertices[n - 1][0] - vertices[0][0], 2) +
-						pow(vertices[n - 1][1] - vertices[0][1], 2));
 			}
 		}
 
@@ -212,7 +236,7 @@ namespace libdxf2mat {
 			int freepts = max_pts < vertices.size() * 2 ? 0 : (max_pts - vertices.size());
 			if (isOpt && freepts > 0)
 			{
-				freepts = ceil(min(double(freepts), m_len * sqrt(trans.det()) / interval));
+				freepts = ceil(min(double(freepts), m_cirlen * sqrt(trans.det()) / interval));
 				size_t n = vertices.size();
 				for (size_t i = 0; i < n; ++i)
 				{
@@ -227,7 +251,7 @@ namespace libdxf2mat {
 						auto r = mickeFormula(vb, ve, cen);
 						auto cen_rad = 4.0 * atan(vb[2]);
 						auto len = r * cen_rad;
-						int pt_nums = round(len / m_len * freepts);
+						int pt_nums = round(len / m_cirlen * freepts);
 						if (pt_nums > 0)
 						{
 							double step = cen_rad / (pt_nums + 1);
@@ -259,7 +283,7 @@ namespace libdxf2mat {
 		vector<Vec3d> vertices;
 		bool isClosed;
 	private:
-		double m_len;
+		double m_cirlen;
 		bool isOpt;
 	};
 
@@ -412,12 +436,22 @@ namespace libdxf2mat {
 
 	class Spline {
 	public:
-		Spline(unsigned _degree, const vector<Vec3d>& vs, const vector<double>& _knots, 
-			int closed, size_t _sampleNum) :
-			degree(_degree), vertexes(vs), knots(_knots), isClosed(closed), 
-			m_impl(vertexes.size(), degree), m_length(0.0)
+		Spline(unsigned int _degree, unsigned int vs, bool closed):
+			degree(_degree), vertices(), knots(), isClosed(closed),
+			m_impl(vs, degree), m_length(0.0)
+		{}
+
+		Spline(unsigned int _degree, const vector<Vec3d>& vs, const vector<double>& _knots, 
+			bool closed, size_t _sampleNum) :
+			degree(_degree), vertices(vs), knots(_knots), isClosed(closed), 
+			m_impl(vertices.size(), degree), m_length(0.0)
 		{
-			m_impl.setNurbsControlPoints(vertexes);
+			update();
+		}
+
+		void update()
+		{
+			m_impl.setNurbsControlPoints(vertices);
 			vector<tinyspline::real> ks;
 			for (const auto& kn : knots)
 				ks.push_back(kn);
@@ -456,7 +490,7 @@ namespace libdxf2mat {
 		}
 
 		unsigned int degree;
-		vector<Vec3d> vertexes;
+		vector<Vec3d> vertices;
 		vector<double> knots;
 		bool isClosed;
 
@@ -464,6 +498,394 @@ namespace libdxf2mat {
 		tinynurbs2d m_impl;
 		double m_length;
 	};
+
+	class InsertInfo {
+	public:
+		InsertInfo(const string& name, double x, double y, double sx, double sy, double rad, 
+			int cs, int rs, double cSp, double rSp):
+			m_name(name), trans2Ds(), id(numeric_limits<size_t>::max())
+		{
+			Trans2D trans(rad, x, y, sx, sy);
+			for (size_t c = 0; c < cs; ++c)
+			{
+				for (size_t r = 0; r < rs; ++r)
+					trans2Ds.push_back(Trans2D(0.0, c * cSp, r * rSp) * trans);
+			}
+		}
+
+		/*! Name of the referred block. */
+		string m_name;	
+		size_t id;
+		/*! transform matrixes from local to global */
+		vector<Trans2D> trans2Ds;
+		/*! Number of colums if we insert an array of the block or 1. */
+		//int cols;
+		/*! Number of rows if we insert an array of the block or 1. */
+		//int rows;
+		/*! Values for the spacing between cols. */
+		//double colSp;
+		/*! Values for the spacing between rows. */
+		//double rowSp;
+
+	};
+
+	using GraphicIDs = array<vector<size_t>, GTYPES>;
+
+	struct Block {
+		Block(const string& name, size_t id):
+			m_name(name), m_id(id), gIDs(), insertInfos()
+		{}
+		string m_name;
+		size_t m_id;
+		GraphicIDs gIDs;
+		vector<InsertInfo> insertInfos;
+	};
+
+	struct GraphicAttr {
+		size_t gtype;
+		size_t id;
+		Trans2D trans;
+		//Rect2d box;
+	};
+
+	using GAttrs = array<vector<GraphicAttr>, GTYPES>;
+
+	class Graphics {
+	public:
+		Graphics() = default;
+
+		//@todo: caculate range of cad drawing from RasterizeData
+		vector<RasterizeData> discretize(double interval, double dx, double dy, 
+			double zoomx, double zoomy, int max_pts) const
+		{
+			Trans2D trans(0.0, dx, dy, zoomx, zoomy);
+			vector<RasterizeData> ras_data;
+			for (const auto& g : m_attrs[LINE])
+				ras_data.emplace_back(lines[g.id].discretize(interval, trans * g.trans, max_pts));
+			for (const auto& g : m_attrs[POLYLINES])
+				ras_data.emplace_back(polylines[g.id].discretize(interval, trans * g.trans, max_pts));
+			for (const auto& g : m_attrs[CIRCLE])
+				ras_data.emplace_back(circles[g.id].discretize(interval, trans * g.trans, max_pts));
+			for (const auto& g : m_attrs[ARC])
+				ras_data.emplace_back(arcs[g.id].discretize(interval, trans * g.trans, max_pts));
+			for (const auto& g : m_attrs[ELLIPSE])
+				ras_data.emplace_back(ellipses[g.id].discretize(interval, trans * g.trans, max_pts));
+			for (const auto& g : m_attrs[SPLINE])
+				ras_data.emplace_back(splines[g.id].discretize(interval, trans * g.trans, max_pts));
+			return ras_data;
+		}
+		
+		GAttrs m_attrs;
+		vector<Line> lines;
+		vector<Polylines> polylines;
+		vector<Circle> circles;
+		vector<Arc> arcs;
+		vector<Ellipse> ellipses;
+		vector<Spline> splines;
+	};
+
+	// Interface to dxflib as official recommendation
+	class DxfParser :public DL_CreationAdapter {
+	public:
+		explicit DxfParser(const string& fn) {}
+
+		// get range of cad drawing
+		virtual void processCodeValuePair(unsigned int code, const std::string& name) override;
+
+		// cache block
+		virtual void addBlock(const DL_BlockData& dl) override;
+		virtual void endBlock() override;
+
+		virtual void addLine(const DL_LineData& dl) override;
+		virtual void addArc(const DL_ArcData& dl) override;
+		virtual void addCircle(const DL_CircleData& dl) override;
+		virtual void addEllipse(const DL_EllipseData& dl) override;
+		virtual void addPolyline(const DL_PolylineData& dl) override;
+		virtual void addVertex(const DL_VertexData& dl) override;
+		virtual void addSpline(const DL_SplineData& dl) override;
+		virtual void addControlPoint(const DL_ControlPointData& dl) override;
+		virtual void addKnot(const DL_KnotData& dl) override;
+		virtual void addInsert(const DL_InsertData& dl) override;
+
+		void postprocess();
+
+	private:
+		// parsed data
+		shared_ptr<Graphics> g_ptr;
+
+		// cache blocks
+		unordered_map<string, size_t> m_name2id;
+		vector<Block> blocks = { Block{"", 0} };
+		size_t blockID = 0;
+
+		// cache properties of polylines
+		size_t poly_vnums;
+
+		// cache properties of spline
+		size_t spline_vnums;
+		size_t spline_knums;
+		
+		// used to get range of cad drawing
+		string currentName = "";
+		static const char extMin[8];
+		static const char extMax[8];
+		Point2d g_tl{ 0.0,0.0 }, g_br{ 0.0,0.0 };
+	};
+
+	const char DxfParser::extMin[8] = "$EXTMIN";
+	const char DxfParser::extMax[8] = "$EXTMAX";
+
+	// get range of cad drawing
+	void DxfParser::processCodeValuePair(unsigned int code, const std::string& name) 
+	{
+		if (code >= 0 && code <= 9)
+		{
+			if (name == extMin || name == extMax)
+				currentName = name;
+			else
+			{
+				currentName = "";
+				return;
+			}
+		}
+
+		if (currentName == extMin)
+		{
+			switch (code)
+			{
+			case 10:
+				g_tl.x = stod(name);
+				break;
+			case 20:
+				g_tl.y = -stod(name);
+				break;
+			default:
+				break;
+			}
+			return;
+		}
+
+		if (currentName == extMax)
+		{
+			switch (code)
+			{
+			case 10:
+				g_br.x = stod(name);
+				break;
+			case 20:
+				g_br.y = -stod(name);
+				break;
+			default:
+				break;
+			}
+			return;
+		}
+	}
+
+	void DxfParser::addBlock(const DL_BlockData& dl)
+	{
+		blockID = blocks.size();
+		blocks.emplace_back(dl.name, blockID);
+		m_name2id[dl.name] = blockID;
+	}
+
+	void DxfParser::endBlock()
+	{
+		blockID = 0;
+	}
+
+	void DxfParser::addLine(const DL_LineData& dl)
+	{
+		auto& lines = g_ptr->lines;
+		blocks[blockID].gIDs[LINE].push_back(lines.size());
+		lines.emplace_back(Point2d(dl.x1, dl.y1), Point2d(dl.x2, dl.y2));
+	}
+
+	void DxfParser::addArc(const DL_ArcData& dl)
+	{
+		double an1 = modular(dl.angle1, 360.0);
+		double an2 = modular(dl.angle2, 360.0);
+		if (an1 > an2)
+			an2 += 360.0;
+		auto& arcs = g_ptr->arcs;
+		blocks[blockID].gIDs[ARC].push_back(arcs.size());
+		arcs.emplace_back(Point2d(dl.cx, dl.cy), dl.radius, 
+			to_rad(an1), to_rad(an2));
+	}
+
+	void DxfParser::addCircle(const DL_CircleData& dl)
+	{
+		auto& cirs = g_ptr->circles;
+		blocks[blockID].gIDs[CIRCLE].push_back(cirs.size());
+		cirs.emplace_back(Point2d(dl.cx, dl.cy), dl.radius);
+	}
+
+	void DxfParser::addEllipse(const DL_EllipseData& dl)
+	{
+		double rad1 = modular(dl.angle1, 2 * CV_PI);
+		double rad2 = modular(dl.angle2, 2 * CV_PI);
+		if (rad1 > rad2)
+			rad2 += 2 * CV_PI;
+		double major = sqrt(dl.mx * dl.mx + dl.my * dl.my);
+		double minor = major * dl.ratio;
+		double rotate = acos(dl.mx / major);
+		rotate = dl.my > 0 ? rotate : (2 * CV_PI - rotate);
+		auto& elli = g_ptr->ellipses;
+		blocks[blockID].gIDs[ELLIPSE].push_back(elli.size());
+		elli.emplace_back(Point2d(dl.cx, dl.cy), Size2d(major, minor), rotate, rad1, rad2);
+	}
+
+	void DxfParser::addPolyline(const DL_PolylineData& dl)
+	{
+		auto& polys = g_ptr->polylines;
+		blocks[blockID].gIDs[POLYLINES].push_back(polys.size());
+		polys.emplace_back(dl.flags);
+		poly_vnums = dl.number;
+	}
+
+	void DxfParser::addVertex(const DL_VertexData& dl)
+	{
+		auto& poly = g_ptr->polylines.back();
+		poly.vertices.emplace_back(dl.x, dl.y, dl.bulge);
+		if (poly.vertices.size() == poly_vnums)
+			poly.update();
+	}
+
+	void DxfParser::addSpline(const DL_SplineData& dl)
+	{
+		auto& sps = g_ptr->splines;
+		blocks[blockID].gIDs[SPLINE].push_back(sps.size());
+		sps.emplace_back(dl.degree, dl.nControl, dl.flags);
+		spline_vnums = dl.nControl;
+		spline_knums = dl.nKnots;
+	}
+
+	void DxfParser::addControlPoint(const DL_ControlPointData& dl)
+	{
+		auto& spline = g_ptr->splines.back();
+		spline.vertices.emplace_back(dl.x, dl.y, dl.w);
+		if (spline.vertices.size() == spline_vnums &&
+			spline.knots.size() == spline_knums)
+			spline.update();
+	}
+
+	void DxfParser::addKnot(const DL_KnotData& dl)
+	{
+		auto& spline = g_ptr->splines.back();
+		spline.knots.emplace_back(dl.k);
+		if (spline.vertices.size() == spline_vnums &&
+			spline.knots.size() == spline_knums)
+			spline.update();
+	}
+
+	void DxfParser::addInsert(const DL_InsertData& dl)
+	{
+		auto& insertInfos = blocks[blockID].insertInfos;
+		insertInfos.emplace_back(dl.name, dl.ipx, dl.ipy, dl.sx, dl.sy,
+			to_rad(dl.angle), dl.cols, dl.rows, dl.colSp, dl.rowSp);
+	}
+
+	void DxfParser::postprocess()
+	{
+		// fit inserts infos
+		for (auto& block : blocks)
+		{
+			auto& inserts = block.insertInfos;
+			auto iter = inserts.begin();
+			while (iter != inserts.end())
+			{
+				if (m_name2id.count(iter->m_name))
+				{
+					iter->id = m_name2id[iter->m_name];
+					++iter;
+				}
+				else
+				{
+					auto pos = iter - inserts.begin();
+					std::swap(*iter, inserts.back());
+					inserts.pop_back();
+					iter = inserts.begin() + pos;
+				}
+			}
+		}
+
+		// Topological sort
+		auto nb = blocks.size();
+		vector<size_t> indegrees(nb, 0);
+		for (const auto& b : blocks)
+		{
+			for (const auto& inser : b.insertInfos)
+				++indegrees[b.m_id];
+		}
+		queue<size_t> q;
+		for (size_t i = 0; i < nb; ++i)
+		{
+			if (indegrees[i] == 0)
+				q.push(i);
+		}
+		auto roots = q.size();
+		vector<size_t> topo_ranks(nb);
+		size_t topoid = 0;
+		while (!q.empty())
+		{
+			auto t = q.front();
+			q.pop();
+			topo_ranks[topoid++] = t;
+			for (const auto& inser : blocks[t].insertInfos)
+			{
+				if (--indegrees[inser.id] == 0)
+					q.push(inser.id);
+			}
+		}
+		std::reverse(topo_ranks.begin(), topo_ranks.end());
+
+		// extract 
+		vector<GAttrs> gAttrsColl(nb);
+		for (auto id : topo_ranks)
+		{
+			const auto& b = blocks[id];
+			auto& gAttrs = gAttrsColl[id];
+			GraphicAttr attr;
+			for (size_t gt = 0; gt < GTYPES; ++gt)
+			{
+				attr.gtype = gt;
+				auto& gt_attrs = gAttrs[gt];
+				for (auto gid : b.gIDs[gt])
+				{
+					attr.id = gid;
+					gt_attrs.push_back(attr);
+				}
+			}
+			for (const auto& inser : b.insertInfos)
+			{
+				const auto& inAttrs = gAttrsColl[inser.id];
+				double xshift = 0.0;
+				vector<Trans2D> trans2Ds;
+				for (size_t gt = 0; gt < GTYPES; ++gt)
+				{
+					auto& gt_attrs = gAttrs[gt];
+					for (const auto& inAttr : inAttrs[gt])
+					{
+						gt_attrs.push_back(inAttr);
+						for (const auto& trans : inser.trans2Ds)
+							gt_attrs.back().trans = trans * inAttr.trans;
+					}
+				}
+			}
+		}
+
+		// merge roots
+		for (size_t root = 0; root < roots; ++root)
+		{
+			const auto& mAttrs = gAttrsColl[topo_ranks[nb - root - 1]];
+			for (size_t gt = 0; gt < GTYPES; ++gt)
+			{
+				auto& gt_attrs = g_ptr->m_attrs[gt];
+				const auto& mt_attrs = mAttrs[gt];
+				gt_attrs.insert(gt_attrs.end(), mt_attrs.begin(), mt_attrs.end());
+			}
+		}
+	}
 
 
 
