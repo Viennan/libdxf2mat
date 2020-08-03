@@ -18,6 +18,7 @@ namespace libdxf2mat {
 	constexpr size_t GTYPES = 6;
 
 	// id of each graphic
+	// start from 0 and must be continuous
 	constexpr size_t LINE = 0;
 	constexpr size_t POLYLINES = 1;
 	constexpr size_t CIRCLE = 2;
@@ -556,7 +557,7 @@ namespace libdxf2mat {
 
 		//@todo: caculate range of cad drawing from RasterizeData
 		vector<RasterizeData> discretize(double interval, double dx, double dy, 
-			double zoomx, double zoomy, int max_pts) const
+			double zoomx, double zoomy, int max_pts, Vec4i* range = nullptr) const
 		{
 			Trans2D trans(0.0, dx, dy, zoomx, zoomy);
 			vector<RasterizeData> ras_data;
@@ -572,7 +573,36 @@ namespace libdxf2mat {
 				ras_data.emplace_back(ellipses[g.id].discretize(interval, trans * g.trans, max_pts));
 			for (const auto& g : m_attrs[SPLINE])
 				ras_data.emplace_back(splines[g.id].discretize(interval, trans * g.trans, max_pts));
+
+			if (range)
+			{
+				int minx = numeric_limits<int>::max(), miny = numeric_limits<int>::max();
+				int maxx = numeric_limits<int>::min(), maxy = numeric_limits<int>::min();
+				for (const auto& frag : ras_data)
+				{
+					for (const auto& p : frag.pts)
+					{
+						minx = min(minx, p.x);
+						miny = min(miny, p.y);
+						maxx = max(maxx, p.y);
+						maxy = max(maxy, p.y);
+					}
+				}
+				*range = Vec4i(minx, miny, maxx, maxy);
+			}
 			return ras_data;
+		}
+
+		void clear()
+		{
+			for (auto& a : m_attrs)
+				a.clear();
+			lines.clear();
+			polylines.clear();
+			circles.clear();
+			arcs.clear();
+			ellipses.clear();
+			splines.clear();
 		}
 		
 		GAttrs m_attrs;
@@ -582,12 +612,14 @@ namespace libdxf2mat {
 		vector<Arc> arcs;
 		vector<Ellipse> ellipses;
 		vector<Spline> splines;
+		Point2d extMin, extMax;
 	};
 
 	// Interface to dxflib as official recommendation
 	class DxfParser :public DL_CreationAdapter {
 	public:
-		explicit DxfParser(const string& fn) {}
+		explicit DxfParser(Graphics *ptr): g_ptr(ptr)
+		{}
 
 		// get range of cad drawing
 		virtual void processCodeValuePair(unsigned int code, const std::string& name) override;
@@ -611,25 +643,25 @@ namespace libdxf2mat {
 
 	private:
 		// parsed data
-		shared_ptr<Graphics> g_ptr;
+		Graphics *g_ptr = nullptr;
 
 		// cache blocks
-		unordered_map<string, size_t> m_name2id;
+		unordered_map<string, size_t> m_name2id = {};
 		vector<Block> blocks = { Block{"", 0} };
 		size_t blockID = 0;
 
 		// cache properties of polylines
-		size_t poly_vnums;
+		size_t poly_vnums = 0;
 
 		// cache properties of spline
-		size_t spline_vnums;
-		size_t spline_knums;
+		size_t spline_vnums = 0;
+		size_t spline_knums = 0;
 		
 		// used to get range of cad drawing
 		string currentName = "";
 		static const char extMin[8];
 		static const char extMax[8];
-		Point2d g_tl{ 0.0,0.0 }, g_br{ 0.0,0.0 };
+		Point2d g_bl{ 0.0,0.0 }, g_tr{ 0.0,0.0 };
 	};
 
 	const char DxfParser::extMin[8] = "$EXTMIN";
@@ -654,10 +686,10 @@ namespace libdxf2mat {
 			switch (code)
 			{
 			case 10:
-				g_tl.x = stod(name);
+				g_bl.x = stod(name);
 				break;
 			case 20:
-				g_tl.y = -stod(name);
+				g_bl.y = stod(name);
 				break;
 			default:
 				break;
@@ -670,10 +702,10 @@ namespace libdxf2mat {
 			switch (code)
 			{
 			case 10:
-				g_br.x = stod(name);
+				g_tr.x = stod(name);
 				break;
 			case 20:
-				g_br.y = -stod(name);
+				g_tr.y = stod(name);
 				break;
 			default:
 				break;
@@ -885,9 +917,94 @@ namespace libdxf2mat {
 				gt_attrs.insert(gt_attrs.end(), mt_attrs.begin(), mt_attrs.end());
 			}
 		}
+
+		// assign drawing range
+		g_ptr->extMin = g_bl;
+		g_ptr->extMax = g_tr;
 	}
 
+	class Dxf2MatImpl {
+	public:
+		Dxf2MatImpl() = default;
 
+		bool parse(const std::string& filename);
+		cv::Mat draw(const DrawConfig& config) const;
+
+		pair<Point2d, Point2d> getRange() const
+		{
+			return make_pair(m_graphics.extMin, m_graphics.extMax);
+		}
+
+	private:
+		Graphics m_graphics;
+	};
+
+	bool Dxf2MatImpl::parse(const std::string& filename)
+	{
+		m_graphics.clear();
+		auto dl_dxf = std::make_unique<DL_Dxf>();
+		auto parser = std::make_unique<DxfParser>(&m_graphics);
+		if(!dl_dxf->in(filename, parser.get()))
+			return false;
+		parser->postprocess();
+		return true;
+	}
+
+	cv::Mat Dxf2MatImpl::draw(const DrawConfig& config) const
+	{
+		Vec4i range;
+		auto ras_data = m_graphics.discretize(config.sample_interval, 0.0, 0.0, 
+			config.zoom, config.zoom, config.max_sample_pts, &range);
+		if (range[0] + config.maxSize.width - 1 > range[1] ||
+			range[2] + config.maxSize.height - 1 > range[3])
+			return cv::Mat();
+
+		int width = range[1] - range[0] + 2 * config.margin.x + 1;
+		int height = range[3] - range[2] + 2 * config.margin.y + 1;
+		Mat canvas(width, height, config.mat_type, config.back_color);
+		// convert to OpenCV coordinate
+		int tx = range[0] - config.margin.x;
+		int ty = range[3] + config.margin.y;
+		for (auto& rpts : ras_data)
+		{
+			for (auto& p : rpts.pts)
+			{
+				p.x -= tx;
+				p.y = ty - p.y;
+			}
+		}
+		
+		// draw
+		for (const auto& rpts : ras_data)
+		{
+			polylines(canvas, rpts.pts, rpts.isClosed, 
+				config.line_color, config.thickness, config.line_type);
+		}
+
+		return canvas;
+	}
+
+	Dxf2Mat::Dxf2Mat():
+		m_impl(std::make_unique<Dxf2MatImpl>())
+	{}
+
+	Dxf2Mat::~Dxf2Mat()
+	{}
+
+	bool Dxf2Mat::parse(const std::string& filename)
+	{
+		return m_impl->parse(filename);
+	}
+
+	cv::Mat Dxf2Mat::draw(const DrawConfig& config) const
+	{
+		return m_impl->draw(config);
+	}
+
+	std::pair<cv::Point2d, cv::Point2d> Dxf2Mat::getRange() const
+	{
+		return m_impl->getRange();
+	}
 
 }  // namespace libdxf2mat
 
