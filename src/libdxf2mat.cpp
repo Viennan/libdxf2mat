@@ -219,13 +219,13 @@ namespace libdxf2mat {
 						continue;
 					Point2d p;
 					auto r = mickeFormula(vertices[i], vertices[i + 1], p);
-					m_cirlen += 4.0 * r * atan(vertices[i][2]);
+					m_cirlen += 4.0 * r * abs(atan(vertices[i][2]));
 				}
 				if (isClosed && vertices[n - 1][2] != 0.0)
 				{
 					Point2d p;
 					auto r = mickeFormula(vertices[n - 1], vertices[0], p);
-					m_cirlen = 4.0 * r * atan(vertices[n - 1][2]);
+					m_cirlen = 4.0 * r * abs(atan(vertices[n - 1][2]));
 				}
 			}
 		}
@@ -251,7 +251,7 @@ namespace libdxf2mat {
 						Point2d cen;
 						auto r = mickeFormula(vb, ve, cen);
 						auto cen_rad = 4.0 * atan(vb[2]);
-						auto len = r * cen_rad;
+						auto len = r * abs(cen_rad);
 						int pt_nums = round(len / m_cirlen * freepts);
 						if (pt_nums > 0)
 						{
@@ -321,8 +321,8 @@ namespace libdxf2mat {
 
 	class Arc {
 	public:
-		Arc(const Point2d& cen, double r, double rad_beg, double rad_end):
-			m_cen(cen), m_r(r), m_beg(rad_beg), m_end(rad_end)
+		Arc(const Point2d& cen, double r, double rad_beg, double theta):
+			m_cen(cen), m_r(r), m_beg(rad_beg), m_theta(theta)
 		{}
 
 		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
@@ -330,8 +330,8 @@ namespace libdxf2mat {
 			// roughly estimates sample points number
 			double zoom = sqrt(trans.det());
 			double r = zoom * m_r;
-			size_t pt_nums = max(2ull, size_t(min(double(max_pts - 1), ceil(r * (m_end - m_beg) / interval))) + 1ull);
-			double step = (m_end - m_beg) / (pt_nums - 1);
+			size_t pt_nums = max(2ull, size_t(min(double(max_pts - 1), ceil(r * m_theta / interval))) + 1ull);
+			double step = m_theta / (pt_nums - 1);
 
 			double theta = m_beg;
 			RasterizeData ras_data;
@@ -350,13 +350,13 @@ namespace libdxf2mat {
 		Point2d m_cen;
 		double m_r;
 		double m_beg;
-		double m_end;
+		double m_theta;
 	};
 
 	class Ellipse {
 	public:
-		Ellipse(const Point2d& cen, const Size2d& axes, double rad, double beg, double End):
-			m_cen(cen), m_axes(axes), m_rot_rad(rad), m_beg(beg), m_end(End)
+		Ellipse(const Point2d& cen, const Size2d& axes, double rad, double beg, double theta):
+			m_cen(cen), m_axes(axes), m_rot_rad(rad), m_beg(beg), m_theta(theta)
 		{}
 
 		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
@@ -364,8 +364,8 @@ namespace libdxf2mat {
 			// roughly estimates sample points number
 			double zoom = sqrt(trans.det());
 			double r = max(m_axes.width, m_axes.height) * zoom;
-			size_t pt_nums = max(2ull, size_t(min(double(max_pts - 1), ceil(r * (m_end - m_beg) / interval))) + 1ull);
-			double step = (m_end - m_beg) / (pt_nums - 1);
+			size_t pt_nums = max(2ull, size_t(min(double(max_pts - 1), ceil(r * abs(m_theta) / interval))) + 1ull);
+			double step = m_theta / (pt_nums - 1);
 
 			double theta = m_beg;
 			RasterizeData ras_data;
@@ -386,7 +386,7 @@ namespace libdxf2mat {
 		Size2d m_axes;
 		double m_rot_rad;
 		double m_beg;
-		double m_end;
+		double m_theta;
 	};
 
 	// A pipline between 2D nurbs to 3D b-spline
@@ -584,11 +584,11 @@ namespace libdxf2mat {
 					{
 						minx = min(minx, p.x);
 						miny = min(miny, p.y);
-						maxx = max(maxx, p.y);
+						maxx = max(maxx, p.x);
 						maxy = max(maxy, p.y);
 					}
 				}
-				*range = Vec4i(minx, miny, maxx, maxy);
+				*range = Vec4i(minx, maxx, miny, maxy);
 			}
 			return ras_data;
 		}
@@ -735,14 +735,18 @@ namespace libdxf2mat {
 
 	void DxfParser::addArc(const DL_ArcData& dl)
 	{
-		double an1 = modular(dl.angle1, 360.0);
-		double an2 = modular(dl.angle2, 360.0);
-		if (an1 > an2)
-			an2 += 360.0;
+		bool anti_clock = getExtrusion()->getDirection()[2] > 0.0;
+		double rad1 = anti_clock ? dl.angle1 : -dl.angle1;
+		double rad2 = anti_clock ? dl.angle2 : -dl.angle2;
+		rad1 = modular(to_rad(rad1), 2 * CV_PI);
+		rad2 = modular(to_rad(rad2), 2 * CV_PI);
+		if ((rad1 == rad2 && dl.angle1 != dl.angle2) || rad1 > rad2)
+			rad2 += 2 * CV_PI;
+		double theta = rad2 - rad1;
 		auto& arcs = g_ptr->arcs;
 		blocks[blockID].gIDs[ARC].push_back(arcs.size());
 		arcs.emplace_back(Point2d(dl.cx, dl.cy), dl.radius, 
-			to_rad(an1), to_rad(an2));
+			rad1, theta);
 	}
 
 	void DxfParser::addCircle(const DL_CircleData& dl)
@@ -754,24 +758,28 @@ namespace libdxf2mat {
 
 	void DxfParser::addEllipse(const DL_EllipseData& dl)
 	{
-		double rad1 = modular(dl.angle1, 2 * CV_PI);
-		double rad2 = modular(dl.angle2, 2 * CV_PI);
-		if (rad1 > rad2)
-			rad2 += 2 * CV_PI;
+		bool anti_clock = getExtrusion()->getDirection()[2] > 0.0;
+		double rad1 = anti_clock ? dl.angle1 : -dl.angle1;
+		double rad2 = anti_clock ? dl.angle2 : -dl.angle2;
+		double theta = rad2 - rad1;
+		if (theta > 2 * CV_PI)
+			theta = modular(theta, 2 * CV_PI);
+		if (theta < -2 * CV_PI)
+			theta = modular(theta, -2 * CV_PI);
 		double major = sqrt(dl.mx * dl.mx + dl.my * dl.my);
 		double minor = major * dl.ratio;
 		double rotate = acos(dl.mx / major);
 		rotate = dl.my > 0 ? rotate : (2 * CV_PI - rotate);
 		auto& elli = g_ptr->ellipses;
 		blocks[blockID].gIDs[ELLIPSE].push_back(elli.size());
-		elli.emplace_back(Point2d(dl.cx, dl.cy), Size2d(major, minor), rotate, rad1, rad2);
+		elli.emplace_back(Point2d(dl.cx, dl.cy), Size2d(major, minor), rotate, rad1, theta);
 	}
 
 	void DxfParser::addPolyline(const DL_PolylineData& dl)
 	{
 		auto& polys = g_ptr->polylines;
 		blocks[blockID].gIDs[POLYLINES].push_back(polys.size());
-		polys.emplace_back(dl.flags);
+		polys.emplace_back(dl.flags & 0x01);
 		poly_vnums = dl.number;
 	}
 
@@ -787,7 +795,7 @@ namespace libdxf2mat {
 	{
 		auto& sps = g_ptr->splines;
 		blocks[blockID].gIDs[SPLINE].push_back(sps.size());
-		sps.emplace_back(dl.degree, dl.nControl, dl.flags);
+		sps.emplace_back(dl.degree, dl.nControl, dl.flags & 0x01);
 		spline_vnums = dl.nControl;
 		spline_knums = dl.nKnots;
 	}
@@ -847,7 +855,7 @@ namespace libdxf2mat {
 		for (const auto& b : blocks)
 		{
 			for (const auto& inser : b.insertInfos)
-				++indegrees[b.m_id];
+				++indegrees[inser.id];
 		}
 		queue<size_t> q;
 		for (size_t i = 0; i < nb; ++i)
@@ -955,13 +963,13 @@ namespace libdxf2mat {
 		Vec4i range;
 		auto ras_data = m_graphics.discretize(config.sample_interval, 0.0, 0.0, 
 			config.zoom, config.zoom, config.max_sample_pts, &range);
-		if (range[0] + config.maxSize.width - 1 > range[1] ||
-			range[2] + config.maxSize.height - 1 > range[3])
+		if (range[0] + config.maxSize.width - 1 < range[1] ||
+			range[2] + config.maxSize.height - 1 < range[3])
 			return cv::Mat();
 
 		int width = range[1] - range[0] + 2 * config.margin.x + 1;
 		int height = range[3] - range[2] + 2 * config.margin.y + 1;
-		Mat canvas(width, height, config.mat_type, config.back_color);
+		Mat canvas(height, width, config.mat_type, config.back_color);
 		// convert to OpenCV coordinate
 		int tx = range[0] - config.margin.x;
 		int ty = range[3] + config.margin.y;

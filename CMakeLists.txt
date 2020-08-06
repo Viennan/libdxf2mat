@@ -16,4 +16,6 @@ include_directories("./include")
 add_subdirectory("./3rd")
 add_subdirectory("./src")
 
-set(Dxf2Mat_LIBS "libdxf2mat")
+set(Dxf2Mat_LIBS "libdxf2mat" ${OpenCV_LIBS} dxflib tinyspline)
+
+add_subdirectory("./test")
