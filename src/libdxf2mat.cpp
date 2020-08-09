@@ -14,18 +14,6 @@ namespace libdxf2mat {
 	using namespace std;
 	using namespace cv;
 
-	// number of graphic types
-	constexpr size_t GTYPES = 6;
-
-	// id of each graphic
-	// start from 0 and must be continuous
-	constexpr size_t LINE = 0;
-	constexpr size_t POLYLINES = 1;
-	constexpr size_t CIRCLE = 2;
-	constexpr size_t ARC = 3;
-	constexpr size_t ELLIPSE = 4;
-	constexpr size_t SPLINE = 5;
-
 	template<typename T>
 	static inline Point round_point(const Point_<T>& p)
 	{
@@ -119,61 +107,23 @@ namespace libdxf2mat {
 		return tmp *= rh;
 	}
 
-	struct RasterizeData {
-		RasterizeData(): pts(), isClosed(false) 
-		{};
-		RasterizeData(const vector<Point>& ps, bool flag) :
-			pts(ps), isClosed(flag)
-		{};
-		RasterizeData(vector<Point>&& ps, bool flag) :
-			pts(std::move(ps)), isClosed(flag)
-		{};
-		RasterizeData(const RasterizeData& lh) :
-			pts(lh.pts), isClosed(lh.isClosed)
-		{};
-		RasterizeData(RasterizeData&& rh) noexcept:
-		pts(std::move(rh.pts)), isClosed(std::move(rh.isClosed))
-		{};
-		RasterizeData& operator= (const RasterizeData& lh)
-		{
-			if (this != std::addressof(lh))
-			{
-				pts = lh.pts;
-				isClosed = lh.isClosed;
-			}
-			return *this;
-		}
-		RasterizeData& operator= (RasterizeData&& rh) noexcept
-		{
-			if (this != std::addressof(rh))
-			{
-				pts = std::move(rh.pts);
-				isClosed = std::move(rh.isClosed);
-			}
-			return *this;
-		}
-
-		vector<Point> pts;
-		bool isClosed;
-	};
-
 	class Line {
 	public:
 		Line(const Point2d& from, const Point2d& to):
-			m_pt1(from), m_pt2(to)
+			m_pt1(from), m_pt2(to), isClosed(false)
 		{}
 
-		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
+		vector<Point2d> discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
-			RasterizeData ras_data;
-			ras_data.isClosed = false;
-			ras_data.pts.emplace_back(round_point(trans.transfer(m_pt1)));
-			ras_data.pts.emplace_back(round_point(trans.transfer(m_pt2)));
+			vector<Point2d> ras_data;
+			ras_data.emplace_back(trans.transfer(m_pt1));
+			ras_data.emplace_back(trans.transfer(m_pt2));
 			return ras_data;
 		}
 	    
 		Point2d m_pt1;
 		Point2d m_pt2;
+		bool isClosed;
 	};
 
 	// Use Micke's Formula to calculate center with begin point and end point and bulge for all cases.
@@ -230,10 +180,9 @@ namespace libdxf2mat {
 			}
 		}
 
-		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
+		vector<Point2d> discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
-			RasterizeData ras_data;
-			ras_data.isClosed = isClosed;
+			vector<Point2d> ras_data;
 			int freepts = max_pts < vertices.size() * 2 ? 0 : (max_pts - vertices.size());
 			if (isOpt && freepts > 0)
 			{
@@ -242,7 +191,7 @@ namespace libdxf2mat {
 				for (size_t i = 0; i < n; ++i)
 				{
 					const auto& vb = vertices[i];
-					ras_data.pts.emplace_back(round_point(trans.transfer(Point2d(vb[0], vb[1]))));
+					ras_data.emplace_back(trans.transfer(Point2d(vb[0], vb[1])));
 					if (!isClosed && i == n - 1)
 						break;
 					const auto& ve = (i == n - 1) ? vertices[0] : vertices[i + 1];
@@ -263,7 +212,7 @@ namespace libdxf2mat {
 							{
 								Point2d p(r * cos(theta), r * sin(theta));
 								p += cen;
-								ras_data.pts.emplace_back(round_point(trans.transfer(p)));
+								ras_data.emplace_back(trans.transfer(p));
 								theta += step;
 							}
 						}
@@ -272,10 +221,10 @@ namespace libdxf2mat {
 			}
 			else
 			{
-				ras_data.pts.resize(vertices.size());
-				std::transform(vertices.cbegin(), vertices.cend(), ras_data.pts.begin(),
+				ras_data.resize(vertices.size());
+				std::transform(vertices.cbegin(), vertices.cend(), ras_data.begin(),
 					[&trans](const Vec3d& p) {
-						return round_point(trans.transfer(Point2d(p[0], p[1])));
+						return trans.transfer(Point2d(p[0], p[1]));
 					});
 			}
 			return ras_data;
@@ -290,10 +239,10 @@ namespace libdxf2mat {
 
 	class Circle {
 	public:
-		Circle(const Point2d& cen, double r) : m_cen(cen), m_r(r) {}
-		Circle(double x, double y, double r) : m_cen(x, y), m_r(r) {}
+		Circle(const Point2d& cen, double r) : m_cen(cen), m_r(r), isClosed(false) {}
+		Circle(double x, double y, double r) : m_cen(x, y), m_r(r), isClosed(false) {}
 
-		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
+		vector<Point2d> discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
 			// roughly estimates sample points number
 			double zoom = sqrt(trans.det());
@@ -302,14 +251,12 @@ namespace libdxf2mat {
 			double step = 2 * CV_PI / pt_nums;
 
 			double theta = 0.0;
-			RasterizeData ras_data;
-			ras_data.isClosed = true;
-			ras_data.pts.resize(pt_nums);
+			vector<Point2d> ras_data(pt_nums);
 			for (size_t i = 0; i < pt_nums; ++i)
 			{
 				Point2d pt(m_r * cos(theta), m_r * sin(theta));
 				pt += m_cen;
-				ras_data.pts[i] = round_point(trans.transfer(pt));
+				ras_data[i] = trans.transfer(pt);
 				theta += step;
 			}
 			return ras_data;
@@ -317,15 +264,16 @@ namespace libdxf2mat {
 
 		Point2d m_cen;
 		double m_r;
+		bool isClosed = false;
 	};
 
 	class Arc {
 	public:
 		Arc(const Point2d& cen, double r, double rad_beg, double theta):
-			m_cen(cen), m_r(r), m_beg(rad_beg), m_theta(theta)
+			m_cen(cen), m_r(r), m_beg(rad_beg), m_theta(theta), isClosed(false)
 		{}
 
-		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
+		vector<Point2d> discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
 			// roughly estimates sample points number
 			double zoom = sqrt(trans.det());
@@ -334,14 +282,12 @@ namespace libdxf2mat {
 			double step = m_theta / (pt_nums - 1);
 
 			double theta = m_beg;
-			RasterizeData ras_data;
-			ras_data.isClosed = false;
-			ras_data.pts.resize(pt_nums);
+			vector<Point2d> ras_data(pt_nums);
 			for (size_t i = 0; i < pt_nums; ++i)
 			{
 				Point2d pt(m_r * cos(theta), m_r * sin(theta));
 				pt += m_cen;
-				ras_data.pts[i] = round_point(trans.transfer(pt));
+				ras_data[i] = trans.transfer(pt);
 				theta += step;
 			}
 			return ras_data;
@@ -351,15 +297,16 @@ namespace libdxf2mat {
 		double m_r;
 		double m_beg;
 		double m_theta;
+		bool isClosed = false;
 	};
 
 	class Ellipse {
 	public:
 		Ellipse(const Point2d& cen, const Size2d& axes, double rad, double beg, double theta):
-			m_cen(cen), m_axes(axes), m_rot_rad(rad), m_beg(beg), m_theta(theta)
+			m_cen(cen), m_axes(axes), m_rot_rad(rad), m_beg(beg), m_theta(theta), isClosed(false)
 		{}
 
-		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
+		vector<Point2d> discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
 			// roughly estimates sample points number
 			double zoom = sqrt(trans.det());
@@ -368,15 +315,13 @@ namespace libdxf2mat {
 			double step = m_theta / (pt_nums - 1);
 
 			double theta = m_beg;
-			RasterizeData ras_data;
-			ras_data.isClosed = false;
-			ras_data.pts.resize(pt_nums);
+			vector<Point2d> ras_data(pt_nums);
 			// Note: tran2d and trans have the same determinant.
 			Trans2D tran2d = trans * Trans2D(m_rot_rad, m_cen.x, m_cen.y);
 			for (int i = 0; i < pt_nums; ++i)
 			{
 				Point2d pt(cos(theta) * m_axes.width, sin(theta) * m_axes.height);
-				ras_data.pts[i] = round_point(tran2d.transfer(pt));
+				ras_data[i] = tran2d.transfer(pt);
 				theta += step;
 			}
 			return ras_data;			
@@ -387,6 +332,7 @@ namespace libdxf2mat {
 		double m_rot_rad;
 		double m_beg;
 		double m_theta;
+		bool isClosed = false;
 	};
 
 	// A pipline between 2D nurbs to 3D b-spline
@@ -473,19 +419,17 @@ namespace libdxf2mat {
 			}
 		}
 
-		RasterizeData discretize(double interval, const Trans2D& trans, int max_pts) const
+		vector<Point2d> discretize(double interval, const Trans2D& trans, int max_pts) const
 		{
 			// roughly estimates sample points number
 			double len = m_length * sqrt(trans.det());
 			size_t pt_nums = max(2ull, size_t(min(double(max_pts - 1), 
 				ceil(len / interval))) + 1ull);
 			auto pts = m_impl.sampleNurbs(pt_nums);
-			RasterizeData ras_data;
-			ras_data.isClosed = isClosed;
-			ras_data.pts.resize(pts.size());
-			std::transform(pts.cbegin(), pts.cend(), ras_data.pts.begin(),
+			vector<Point2d> ras_data(pts.size());
+			std::transform(pts.cbegin(), pts.cend(), ras_data.begin(),
 				[&trans](const Point2d& p) { 
-					return round_point(trans.transfer(p)); 
+					return trans.transfer(p); 
 				});
 			return ras_data;
 		}
@@ -551,46 +495,41 @@ namespace libdxf2mat {
 
 	using GAttrs = array<vector<GraphicAttr>, GTYPES>;
 
+	template<typename T>
+	static inline vector<Curve>::iterator rasterize(vector<Curve>::iterator curve, const vector<GraphicAttr>& attrs,
+		const vector<T>& gs, double interval, const Trans2D& trans, size_t max_pts)
+	{
+		for (const auto& attr : attrs)
+		{
+			const auto& g = gs[attr.id];
+			curve->m_pts = g.discretize(interval, trans * attr.trans, max_pts);
+			curve->isClosed = g.isClosed;
+			curve->m_gtype = attr.gtype;
+			curve->m_id = attr.id;
+			++curve;
+		}
+		return curve;
+	}
+
 	class Graphics {
 	public:
 		Graphics() = default;
 
-		//@todo: caculate range of cad drawing from RasterizeData
-		vector<RasterizeData> discretize(double interval, double dx, double dy, 
-			double zoomx, double zoomy, int max_pts, Vec4i* range = nullptr) const
+		vector<Curve> discretize(double interval, double dx, double dy, 
+			double zoomx, double zoomy, int max_pts) const
 		{
 			Trans2D trans(0.0, dx, dy, zoomx, zoomy);
-			vector<RasterizeData> ras_data;
-			for (const auto& g : m_attrs[LINE])
-				ras_data.emplace_back(lines[g.id].discretize(interval, trans * g.trans, max_pts));
-			for (const auto& g : m_attrs[POLYLINES])
-				ras_data.emplace_back(polylines[g.id].discretize(interval, trans * g.trans, max_pts));
-			for (const auto& g : m_attrs[CIRCLE])
-				ras_data.emplace_back(circles[g.id].discretize(interval, trans * g.trans, max_pts));
-			for (const auto& g : m_attrs[ARC])
-				ras_data.emplace_back(arcs[g.id].discretize(interval, trans * g.trans, max_pts));
-			for (const auto& g : m_attrs[ELLIPSE])
-				ras_data.emplace_back(ellipses[g.id].discretize(interval, trans * g.trans, max_pts));
-			for (const auto& g : m_attrs[SPLINE])
-				ras_data.emplace_back(splines[g.id].discretize(interval, trans * g.trans, max_pts));
-
-			if (range)
-			{
-				int minx = numeric_limits<int>::max(), miny = numeric_limits<int>::max();
-				int maxx = numeric_limits<int>::min(), maxy = numeric_limits<int>::min();
-				for (const auto& frag : ras_data)
-				{
-					for (const auto& p : frag.pts)
-					{
-						minx = min(minx, p.x);
-						miny = min(miny, p.y);
-						maxx = max(maxx, p.x);
-						maxy = max(maxy, p.y);
-					}
-				}
-				*range = Vec4i(minx, maxx, miny, maxy);
-			}
-			return ras_data;
+			size_t sz = 0;
+			for (const auto& gs : m_attrs)
+				sz += gs.size();
+			vector<Curve> curves(sz);
+			auto iter = rasterize(curves.begin(), m_attrs[LINE], lines, interval, trans, max_pts);
+			iter = rasterize(iter, m_attrs[POLYLINES], polylines, interval, trans, max_pts);
+			iter = rasterize(iter, m_attrs[CIRCLE], circles, interval, trans, max_pts);
+			iter = rasterize(iter, m_attrs[ARC], arcs, interval, trans, max_pts);
+			iter = rasterize(iter, m_attrs[ELLIPSE], ellipses, interval, trans, max_pts);
+			iter = rasterize(iter, m_attrs[SPLINE], splines, interval, trans, max_pts);
+			return curves;
 		}
 
 		void clear()
@@ -936,11 +875,13 @@ namespace libdxf2mat {
 		Dxf2MatImpl() = default;
 
 		bool parse(const std::string& filename);
-		cv::Mat draw(const DrawConfig& config) const;
+		vector<Curve> discretizeAll(const DiscreConfig& conf, Rect2d& box, double shiftx = 0.0, double shifty = 0.0) const;
+		cv::Mat draw(const DrawConfig& conf_draw, const DiscreConfig& conf_dis) const;
 
-		pair<Point2d, Point2d> getRange() const
+		Size2d getScope() const
 		{
-			return make_pair(m_graphics.extMin, m_graphics.extMax);
+			return Size2d(m_graphics.extMax.x - m_graphics.extMin.x,
+				m_graphics.extMax.y - m_graphics.extMin.y);
 		}
 
 	private:
@@ -958,37 +899,75 @@ namespace libdxf2mat {
 		return true;
 	}
 
-	cv::Mat Dxf2MatImpl::draw(const DrawConfig& config) const
+	vector<Curve> Dxf2MatImpl::discretizeAll(const DiscreConfig& conf, Rect2d& box, double shiftx, double shifty) const
 	{
-		Vec4i range;
-		auto ras_data = m_graphics.discretize(config.sample_interval, 0.0, 0.0, 
-			config.zoom, config.zoom, config.max_sample_pts, &range);
-		if (range[0] + config.maxSize.width - 1 < range[1] ||
-			range[2] + config.maxSize.height - 1 < range[3])
-			return cv::Mat();
+		constexpr double infMax = numeric_limits<double>::max();
+		constexpr double infMin = numeric_limits<double>::min();
+		
+		auto curves = m_graphics.discretize(conf.sample_interval, 0.0, 0.0,
+			conf.zoom, conf.zoom, conf.max_sample_pts);
 
-		int width = range[1] - range[0] + 2 * config.margin.x + 1;
-		int height = range[3] - range[2] + 2 * config.margin.y + 1;
-		Mat canvas(height, width, config.mat_type, config.back_color);
-		// convert to OpenCV coordinate
-		int tx = range[0] - config.margin.x;
-		int ty = range[3] + config.margin.y;
-		for (auto& rpts : ras_data)
+		double minx = infMax, miny = infMax;
+		double maxx = infMin, maxy = infMin;
+		for (const auto& curve : curves)
 		{
-			for (auto& p : rpts.pts)
+			for (const auto& p : curve.m_pts)
 			{
-				p.x -= tx;
-				p.y = ty - p.y;
+				minx = min(minx, p.x);
+				miny = min(miny, p.y);
+				maxx = max(maxx, p.x);
+				maxy = max(maxy, p.y);
 			}
 		}
-		
-		// draw
-		for (const auto& rpts : ras_data)
+		box = Rect2d(shiftx, shifty, maxx - minx, maxy - miny);
+
+		double tx = minx - shiftx;
+		double ty = maxy + shifty;
+		for (auto& curve : curves)
 		{
-			polylines(canvas, rpts.pts, rpts.isClosed, 
-				config.line_color, config.thickness, config.line_type);
+			double minbx = infMax, minby = infMax;
+			double maxbx = infMin, maxby = infMin;
+			for (auto& p : curve.m_pts)
+			{
+				double x = p.x;
+				double y = p.y;
+				x -= tx;
+				y = ty - y;
+				minbx = min(minbx, x);
+				minby = min(minby, y);
+				maxbx = max(maxbx, x);
+				maxby = max(maxby, y);
+				p.x = x;
+				p.y = y;
+			}
+			curve.m_box = Rect2d(minbx, minby, maxbx - minbx, maxby - minby);
 		}
 
+		return curves;
+	}
+
+	cv::Mat Dxf2MatImpl::draw(const DrawConfig& conf_draw, const DiscreConfig& conf_dis) const
+	{
+		Rect2d box;
+		auto curves = discretizeAll(conf_dis, box, conf_draw.margin.x, conf_draw.margin.y);
+
+		if (box.width > conf_draw.maxSize.width || box.height > conf_draw.maxSize.height)
+			return Mat();
+
+		int width = 2 * conf_draw.margin.x + round(box.width);
+		int height = 2 * conf_draw.margin.y + round(box.height);
+		Mat canvas(Size(width, height), conf_draw.mat_type, conf_draw.back_color);
+		vector<Point> pts;
+		for (const auto& curve : curves)
+		{
+			pts.clear();
+			for (const auto& p : curve.m_pts)
+				pts.emplace_back(round(p.x), round(p.y));
+
+			polylines(canvas, pts, curve.isClosed,
+				conf_draw.line_color, conf_draw.thickness, conf_draw.line_type);
+		}
+		
 		return canvas;
 	}
 
@@ -1004,14 +983,20 @@ namespace libdxf2mat {
 		return m_impl->parse(filename);
 	}
 
-	cv::Mat Dxf2Mat::draw(const DrawConfig& config) const
+	cv::Mat Dxf2Mat::draw(const DrawConfig& conf_draw, const DiscreConfig& conf_dis) const
 	{
-		return m_impl->draw(config);
+		return m_impl->draw(conf_draw, conf_dis);
 	}
 
-	std::pair<cv::Point2d, cv::Point2d> Dxf2Mat::getRange() const
+	std::vector<Curve> Dxf2Mat::discretizeAll(const DiscreConfig& confi, 
+		cv::Rect2d& box, double shiftx, double shifty) const
 	{
-		return m_impl->getRange();
+		return m_impl->discretizeAll(confi, box, shiftx, shifty);
+	}
+
+	Size2d Dxf2Mat::getScope() const
+	{
+		return m_impl->getScope();
 	}
 
 }  // namespace libdxf2mat
